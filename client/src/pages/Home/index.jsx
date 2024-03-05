@@ -8,13 +8,13 @@ const HomePage = () => {
   const navigate = useNavigate();
 
   const handleStartCall = () => {
-    socket.emit("room:create", { name: "Milan" });
+    socket.emit("room:create");
   };
 
   const handleRoomCreated = useCallback(
     (roomId) => {
       console.log("Room Created", roomId);
-      navigate(`/room/${roomId}`, { state: { isCreator: true } });
+      navigate(`/room/${roomId}`, { state: { host: true } });
     },
     [navigate]
   );

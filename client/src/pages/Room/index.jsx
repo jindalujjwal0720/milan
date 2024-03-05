@@ -1,163 +1,270 @@
 import React, { useCallback, useEffect, useState } from "react";
 import styles from "./RoomPage.module.css";
-import { useParams, useLocation, useNavigate } from "react-router-dom";
-import peerService from "../../service/Peer";
+import { useParams, useLocation } from "react-router-dom";
 import { useSocket } from "../../context/SocketProvider";
 
 const RoomPage = () => {
-  const socket = useSocket();
   const { roomId } = useParams();
+  const socket = useSocket();
   const location = useLocation();
-  const navigate = useNavigate();
-  const [isVideoEnabled, setIsVideoEnabled] = useState(false);
-  const [isAudioEnabled, setIsAudioEnabled] = useState(false);
   /** @type {[MediaStream, (stream: MediaStream) => void]} */
-  const [myStream, setMyStream] = useState(null);
+  const [localStream, setLocalStream] = useState(null);
   /** @type {[MediaStream, (stream: MediaStream) => void]} */
-  const [peerStream, setPeerStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  /** @type {[RTCPeerConnection, (peerConnection: RTCPeerConnection) => void]} */
+  const [peerConnection, setPeerConnection] = useState(null);
+  const [text, setText] = useState("");
 
-  const stopMyStream = useCallback(() => {
-    if (myStream) {
-      myStream.getTracks().forEach((track) => {
-        track.stop();
+  const addTracks = useCallback(() => {
+    try {
+      if (peerConnection && localStream) {
+        localStream.getTracks().forEach((track) => {
+          peerConnection.addTrack(track, localStream);
+        });
+      }
+    } catch (error) {
+      console.log("Error adding tracks", error);
+    }
+  }, [peerConnection, localStream]);
+
+  useEffect(() => {
+    addTracks();
+  }, [addTracks]);
+
+  const getUserMedia = useCallback(async () => {
+    navigator.mediaDevices
+      .getUserMedia({ video: true, audio: false })
+      .then((stream) => {
+        setLocalStream(stream);
+        addTracks();
+      })
+      .catch((err) => {
+        console.error("Error accessing media devices.", err);
       });
-      setMyStream(null);
-    }
-  }, [myStream]);
+  }, [addTracks]);
 
-  const toggleMyVideo = () => {
-    if (myStream) {
-      if (!isAudioEnabled && isVideoEnabled) {
-        // If audio is disabled and video is enabled,
-        // after disabling video, stream will be stopped
-        // and set to null
-        console.log("stopping stream");
-        stopMyStream();
-        setIsVideoEnabled(false);
-      } else {
-        // If audio is enabled or video is disabled,
-        // only video will be toggled
-        console.log("toggling video");
-        myStream.getVideoTracks().forEach((track) => {
-          track.enabled = !isVideoEnabled;
-        });
-        setIsVideoEnabled(!isVideoEnabled);
+  const createPeerConnection = useCallback(() => {
+    const config = {
+      iceServers: [
+        {
+          urls: [
+            "stun:stun.l.google.com:19302",
+            "stun:stun1.l.google.com:19302",
+            "stun:stun2.l.google.com:19302",
+          ],
+        },
+      ],
+    };
+    const pc = new RTCPeerConnection(config);
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        console.log("New ICE candidate", event.candidate);
+        socket.emit("room:call:ice-candidate", roomId, event.candidate);
       }
-    } else {
-      // If stream is null, get the video stream
-      console.log("getting stream");
-      navigator.mediaDevices
-        .getUserMedia({ video: true, audio: true })
-        .then((stream) => {
-          stream.getAudioTracks().forEach((track) => {
-            track.enabled = false;
-          });
-          setMyStream(stream);
-          setIsVideoEnabled(true);
-        })
-        .catch((err) => {
-          console.log("Error getting video stream", err);
-        });
-    }
-  };
+    };
+    pc.oniceconnectionstatechange = (event) => {
+      console.log("ICE connection state change", event);
+    };
+    pc.ontrack = (event) => {
+      // on receiving remote stream
+      console.log("New Track", event.streams[0]);
+      setRemoteStream(event.streams[0]);
+    };
+    console.log("Peer Connection created", pc);
+    setPeerConnection(pc);
+  }, [socket, roomId]);
 
-  const toggleMyAudio = () => {
-    if (myStream) {
-      if (!isVideoEnabled && isAudioEnabled) {
-        // If video is disabled and audio is enabled,
-        // after disabling audio, stream will be stopped
-        // and set to null
-        console.log("stopping stream");
-        stopMyStream();
-        setIsAudioEnabled(false);
-      } else {
-        // If video is enabled or audio is disabled,
-        // only audio will be toggled
-        console.log("toggling audio");
-        myStream.getAudioTracks().forEach((track) => {
-          track.enabled = !isAudioEnabled;
+  const createOffer = useCallback(async () => {
+    try {
+      if (peerConnection) {
+        const offer = await peerConnection.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
         });
-        setIsAudioEnabled(!isAudioEnabled);
+        console.log("Offer Created", offer);
+        return offer;
       }
-    } else {
-      // If stream is null, get the audio stream
-      console.log("getting stream");
-      navigator.mediaDevices
-        .getUserMedia({ video: true, audio: true })
-        .then((stream) => {
-          stream.getVideoTracks().forEach((track) => {
-            track.enabled = false;
-          });
-          setMyStream(stream);
-          setIsAudioEnabled(true);
-        })
-        .catch((err) => {
-          console.log("Error getting audio stream", err);
-        });
+    } catch (error) {
+      console.log("Error creating offer", error);
     }
-  };
+  }, [peerConnection]);
 
-  const handleRoomLeave = useCallback(() => {
-    console.log("Leaving room");
-    stopMyStream();
-    socket.emit("room:leave", roomId);
-  }, [stopMyStream, socket, roomId]);
+  const createAnswer = useCallback(async () => {
+    try {
+      if (peerConnection) {
+        const answer = await peerConnection.createAnswer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: true,
+        });
+        console.log("Answer Created", answer);
+        return answer;
+      }
+    } catch (error) {
+      console.log("Error creating answer", error);
+    }
+  }, [peerConnection]);
 
-  const handlePeerJoinPermission = useCallback(
-    (user) => {
-      const allowed = window.confirm("A user wants to join");
-      if (allowed) {
-        socket.emit("room:join:accepted", user);
-      } else {
-        socket.emit("room:join:denied", user);
+  const setLocalDescription = useCallback(
+    async (offer) => {
+      try {
+        if (!offer) return;
+        console.log("Setting Local Description", offer);
+        if (peerConnection) {
+          const desc = new RTCSessionDescription(offer);
+          await peerConnection.setLocalDescription(desc);
+        }
+      } catch (error) {
+        console.log("Error setting local description", error);
       }
     },
-    [socket]
+    [peerConnection]
   );
 
-  // cannot join room directly from URL
-  useEffect(() => {
-    if (!location.state) {
-      return navigate("/", { replace: true });
-    }
-    const { from, isCreator } = location.state;
-    if (from !== "lobby" && !isCreator) {
-      navigate("/", { replace: true });
-    }
-  }, [socket, roomId, location, navigate, handleRoomLeave]);
+  const setRemoteDescription = useCallback(
+    async (offer) => {
+      try {
+        if (!offer) return;
+        console.log("Setting Remote Description", offer);
+        if (peerConnection) {
+          const desc = new RTCSessionDescription(offer);
+          await peerConnection.setRemoteDescription(desc);
+        }
+      } catch (error) {
+        console.log("Error setting remote description", error);
+      }
+    },
+    [peerConnection]
+  );
 
-  // listener for window close event
-  useEffect(() => {
-    window.addEventListener("beforeunload", handleRoomLeave);
-    return () => {
-      window.removeEventListener("beforeunload", handleRoomLeave);
-    };
-  }, [handleRoomLeave]);
+  const addIceCandidate = useCallback(
+    async (candidate) => {
+      try {
+        console.log("Adding ICE candidate", candidate);
+        if (peerConnection) {
+          const iceCandidate = new RTCIceCandidate(candidate);
+          await peerConnection.addIceCandidate(iceCandidate);
+        }
+      } catch (error) {
+        console.log("Error adding ICE candidate", error);
+      }
+    },
+    [peerConnection]
+  );
 
-  // socket listeners
+  const handleNewUserJoined = useCallback((userId) => {
+    console.log("User Joined", userId);
+    createOffer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const call = useCallback(async () => {
+    const offer = await createOffer();
+    console.log("Calling...", offer);
+    await setLocalDescription(offer);
+    socket.emit("room:call:offer", offer);
+  }, [createOffer, socket, setLocalDescription]);
+
+  const answerCall = useCallback(async () => {
+    const answer = await createAnswer();
+    console.log("Answering...", answer);
+    await setLocalDescription(answer);
+    socket.emit("room:call:answer", answer);
+  }, [createAnswer, setLocalDescription, socket]);
+
+  const handleRoomCallOffered = useCallback(
+    async (from, offer) => {
+      if (!offer) return;
+      console.log("Call Offer received", from, offer);
+      await setRemoteDescription(offer);
+      answerCall();
+    },
+    [setRemoteDescription, answerCall]
+  );
+
+  const handleRoomCallAnswered = useCallback(
+    async (from, answer) => {
+      if (!answer) return;
+      console.log("Call Answer received", from, answer);
+      await setRemoteDescription(answer);
+    },
+    [setRemoteDescription]
+  );
+
+  const handleRoomCallIceCandidate = useCallback(
+    async (from, candidate) => {
+      console.log("ICE Candidate received", candidate);
+      await addIceCandidate(candidate);
+    },
+    [addIceCandidate]
+  );
+
   useEffect(() => {
-    socket.on("room:join:permission", handlePeerJoinPermission);
+    console.log("Room page rendered", location.state);
+
+    if (location.state && location.state.host) {
+      createPeerConnection();
+      getUserMedia();
+    } else if (location.state && location.state.room) {
+      createPeerConnection();
+      getUserMedia().then(() => {
+        socket.emit("room:call");
+      });
+    }
+
     return () => {
-      socket.off("room:join:permission", handlePeerJoinPermission);
+      if (localStream) {
+        localStream.getTracks().forEach((track) => {
+          track.stop();
+        });
+      }
+      if (remoteStream) {
+        remoteStream.getTracks().forEach((track) => {
+          track.stop();
+        });
+      }
+      if (peerConnection) {
+        peerConnection.close();
+      }
     };
-  }, [handlePeerJoinPermission, socket]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
+
+  // socket event listeners
+  useEffect(() => {
+    socket.on("room:user:joined", handleNewUserJoined);
+    socket.on("room:call:offered", handleRoomCallOffered);
+    socket.on("room:call:answered", handleRoomCallAnswered);
+    socket.on("room:call:ice-candidate", handleRoomCallIceCandidate);
+    socket.on("room:call", call);
+
+    return () => {
+      socket.off("room:user:joined", handleNewUserJoined);
+      socket.off("room:call:offered", handleRoomCallOffered);
+      socket.off("room:call:answered", handleRoomCallAnswered);
+      socket.off("room:call:ice-candidate", handleRoomCallIceCandidate);
+    };
+  }, [
+    socket,
+    handleNewUserJoined,
+    handleRoomCallOffered,
+    handleRoomCallAnswered,
+    handleRoomCallIceCandidate,
+    call,
+  ]);
 
   return (
     <div>
       <h1>Room: {roomId}</h1>
-      <p>
-        Audio: {isAudioEnabled ? "Enabled" : "Disabled"} | Video:{" "}
-        {isVideoEnabled ? "Enabled" : "Disabled"}
-      </p>
       <div className={styles.container}>
         <div className={styles.videos}>
-          {myStream ? (
+          {localStream ? (
             <video
               autoPlay
               playsInline
+              muted
               ref={(video) => {
                 if (video) {
-                  video.srcObject = myStream;
+                  video.srcObject = localStream;
                 }
               }}
               className={styles.myVideo}
@@ -167,10 +274,26 @@ const RoomPage = () => {
               <p>No Video</p>
             </div>
           )}
+          {remoteStream ? (
+            <video
+              autoPlay
+              playsInline
+              muted
+              ref={(video) => {
+                if (video) {
+                  video.srcObject = remoteStream;
+                }
+              }}
+              className={styles.remoteVideo}
+            ></video>
+          ) : (
+            <div className={styles.remoteVideo}>
+              <p>No Video</p>
+            </div>
+          )}
         </div>
         <div className={styles.controls}>
-          <button onClick={toggleMyAudio}>Toggle Audio</button>
-          <button onClick={toggleMyVideo}>Toggle Video</button>
+          <button onClick={call}>Call</button>
         </div>
       </div>
     </div>
